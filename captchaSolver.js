@@ -1,4 +1,4 @@
-const puppeteer = require("puppeteer-extra");
+const { connect } = require("puppeteer-real-browser");
 const express = require('express');
 const chalk = require('chalk');
 const app = express();
@@ -28,34 +28,80 @@ async function main() {
   });
 }
 
+const checkTurnstile = ({ page }) => {
+  return new Promise(async (resolve, reject) => {
+    var waitInterval = setTimeout(() => { clearInterval(waitInterval); resolve(false) }, 5000);
+    try {
+      const elements = await page.$$('[name="cf-turnstile-response"]');
+      if (elements.length <= 0) {
+
+        const coordinates = await page.evaluate(() => {
+          let coordinates = [];
+          document.querySelectorAll('div').forEach(item => {
+            try {
+              let itemCoordinates = item.getBoundingClientRect()
+              let itemCss = window.getComputedStyle(item)
+              if (itemCss.margin == "0px" && itemCss.padding == "0px" && itemCoordinates.width > 290 && itemCoordinates.width <= 310 && !item.querySelector('*')) {
+                coordinates.push({ x: itemCoordinates.x, y: item.getBoundingClientRect().y, w: item.getBoundingClientRect().width, h: item.getBoundingClientRect().height })
+              }
+            } catch (err) { }
+          });
+
+          if (coordinates.length <= 0) {
+            document.querySelectorAll('div').forEach(item => {
+              try {
+                let itemCoordinates = item.getBoundingClientRect()
+                if (itemCoordinates.width > 290 && itemCoordinates.width <= 310 && !item.querySelector('*')) {
+                  coordinates.push({ x: itemCoordinates.x, y: item.getBoundingClientRect().y, w: item.getBoundingClientRect().width, h: item.getBoundingClientRect().height })
+                }
+              } catch (err) { }
+            });
+
+          }
+
+          return coordinates
+        })
+
+        for (const item of coordinates) {
+          try {
+            let x = item.x + 30;
+            let y = item.y + item.h / 2;
+            await page.mouse.click(x, y);
+          } catch (err) { }
+        }
+        return resolve(true)
+      }
+
+      for (const element of elements) {
+        try {
+          const parentElement = await element.evaluateHandle(el => el.parentElement);
+          const box = await parentElement.boundingBox();
+          let x = box.x + 30;
+          let y = box.y + box.height / 2;
+          await page.mouse.click(x, y);
+        } catch (err) { }
+      }
+      clearInterval(waitInterval)
+      resolve(true)
+    } catch (err) {
+      clearInterval(waitInterval)
+      resolve(false)
+    }
+  })
+}
 
 async function openBrowser(targetURL) {
-  const userAgents = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-  ];
 
-  const randomIndex = Math.floor(Math.random() * userAgents.length);
-  const randomUserAgent = userAgents[randomIndex];
-
-  const options = {
+  const { browser, page } = await connect({
     headless: false,
-    ignoreHTTPSErrors: true,
-    args: [
-      "--no-sandbox",
-      "--no-first-run",
-      "--ignore-certificate-errors",
-      "--disable-extensions",
-      "--test-type",
-      "--user-agent="
-      + randomUserAgent
-    ]
-  };
+    args: [],
+    customConfig: {},
+    turnstile: false,
+    connectOption: { defaultViewport: null },
+    disableXvfb: false,
+    ignoreAllFlags: false,
+  });
 
-  const browser = await puppeteer.launch(options);
-  const [page] = await browser.pages();
   const client = page._client();
   page.on("framenavigated", (frame) => {
     if (frame.url().includes("challenges.cloudflare.com") === true) client.send("Target.detachFromTarget", { targetId: frame._id });
@@ -72,52 +118,16 @@ async function openBrowser(targetURL) {
   if (content.includes("challenge-platform") === true) {
     console.log(chalk.yellow('Found CloudFlare challenge'));
     try {
-      await sleep(20);
-      return new Promise(async (resolve) => {
-        const waitInterval = setTimeout(() => { clearInterval(waitInterval); resolve(false); }, 5000);
+      await sleep(5);
+      interval = setInterval(async () => {
         try {
-          const elements = await page.$$('[name="cf-turnstile-response"]');
-          if (elements.length === 0) {
-            const coordinates = await page.evaluate(() => {
-              const coords = [];
-              const checkDivs = () => {
-                document.querySelectorAll('div').forEach(item => {
-                  try {
-                    const rect = item.getBoundingClientRect();
-                    const style = window.getComputedStyle(item);
-                    if (style.margin === "0px" && style.padding === "0px" && rect.width > 290 && rect.width <= 310 && !item.querySelector('*')) {
-                      coords.push({ x: rect.x, y: rect.y, w: rect.width, h: rect.height });
-                    }
-                  } catch (err) { }
-                });
-              };
-              checkDivs();
-              if (coords.length === 0) checkDivs();
-              return coords;
-            });
-
-            for (const { x, y, h } of coordinates) {
-              try { await page.mouse.click(x + 30, y + h / 2); } catch (err) { }
-            }
-            return resolve(true);
-          }
-
-          for (const element of elements) {
-            try {
-              const parent = await element.evaluateHandle(el => el.parentElement);
-              const box = await parent.boundingBox();
-              await page.mouse.click(box.x + 30, box.y + box.height / 2);
-            } catch (err) { }
-          }
-          clearInterval(waitInterval);
-          resolve(true);
-        } catch (err) {
-          clearInterval(waitInterval);
-          resolve(false);
-        }
-      });
+          await checkTurnstile({ page });
+        } catch (err) { }
+      }, 1000);
+      await sleep(10);
     } finally {
       await sleep(10);
+      clearInterval(interval);
       const title = await page.title();
       const cookies = await page.cookies();
       const cookie = cookies.map(cookie => cookie.name + "=" + cookie.value).join("; ").trim();
