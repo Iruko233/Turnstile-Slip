@@ -1,6 +1,47 @@
-const { connect } = require("puppeteer-real-browser");
 const express = require('express');
-const chalk = require('chalk');
+const winston = require('winston');
+
+const lang = process.argv.includes('--lang=en') ? 'en' : 'zh';
+
+const i18n = {
+  zh: {
+    apiError: 'API 错误: ',
+    serverRunning: '服务已启动，监听地址: http://localhost:',
+    locError: '定位报错: ',
+    locSuccess: '[定位成功] 原始外框: ',
+    pageClosed: '页面已关闭',
+    clickPos: '[执行点击] 落脚点: ',
+    foundCaptcha: '发现 CloudFlare 验证码',
+    fastModeSuccess: 'FastMode: 已获取到 cf_clearance，提前结束！',
+    solved: '验证码已解决',
+    noCaptcha: '未检测到验证码'
+  },
+  en: {
+    apiError: 'API Error: ',
+    serverRunning: 'Server is running at http://localhost:',
+    locError: 'Locator Error: ',
+    locSuccess: '[Locator Success] Box: ',
+    pageClosed: 'Page closed',
+    clickPos: '[Click Execution] Position: ',
+    foundCaptcha: 'Found CloudFlare challenge',
+    fastModeSuccess: 'FastMode: cf_clearance obtained, ending early!',
+    solved: 'Challenge solved',
+    noCaptcha: 'No challenge detected'
+  }
+};
+
+const t = i18n[lang];
+
+const logger = winston.createLogger({
+  level: 'debug',
+  format: winston.format.combine(
+    winston.format.colorize(),
+    winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
+    winston.format.printf(info => `[${info.timestamp}] ${info.level}: ${info.message}`)
+  ),
+  transports: [new winston.transports.Console()]
+});
+
 const app = express();
 const port = 3000;
 
@@ -9,13 +50,14 @@ const sleep = duration => new Promise(resolve => setTimeout(resolve, duration * 
 async function main() {
   app.get('/api', async (req, res) => {
     const targetURL = req.query.target;
+    const fastMode = req.query.fast === 'true';
 
     if (targetURL) {
       try {
-        const { title, cookie, userAgent } = await openBrowser(targetURL);
+        const { title, cookie, userAgent } = await openBrowser(targetURL, fastMode);
         res.send({ title, userAgent, cookie });
       } catch (error) {
-        console.error(error);
+        logger.error(`${t.apiError}${error.stack || error}`);
         res.status(500).send('Internal Server Error');
       }
     } else {
@@ -24,7 +66,7 @@ async function main() {
   });
 
   app.listen(port, () => {
-    console.log(`Server is running at http://localhost:${port}`);
+    logger.info(`${t.serverRunning}${port}`);
   });
 }
 
@@ -32,80 +74,61 @@ const checkTurnstile = ({ page }) => {
   return new Promise(async (resolve, reject) => {
     var waitInterval = setTimeout(() => { clearInterval(waitInterval); resolve(false) }, 5000);
     try {
-      const elements = await page.$$('[name="cf-turnstile-response"]');
-      if (elements.length <= 0) {
+      let box = null;
 
-        const coordinates = await page.evaluate(() => {
-          let coordinates = [];
-          document.querySelectorAll('div').forEach(item => {
-            try {
-              let itemCoordinates = item.getBoundingClientRect()
-              let itemCss = window.getComputedStyle(item)
-              if (itemCss.margin == "0px" && itemCss.padding == "0px" && itemCoordinates.width > 290 && itemCoordinates.width <= 310 && !item.querySelector('*')) {
-                coordinates.push({ x: itemCoordinates.x, y: item.getBoundingClientRect().y, w: item.getBoundingClientRect().width, h: item.getBoundingClientRect().height })
-              }
-            } catch (err) { }
-          });
-
-          if (coordinates.length <= 0) {
-            document.querySelectorAll('div').forEach(item => {
-              try {
-                let itemCoordinates = item.getBoundingClientRect()
-                if (itemCoordinates.width > 290 && itemCoordinates.width <= 310 && !item.querySelector('*')) {
-                  coordinates.push({ x: itemCoordinates.x, y: item.getBoundingClientRect().y, w: item.getBoundingClientRect().width, h: item.getBoundingClientRect().height })
-                }
-              } catch (err) { }
-            });
-
+      try {
+        const wrapper = await page.$('div:has(> div > div > input[name="cf-turnstile-response"])');
+        if (wrapper) {
+          const rect = await wrapper.boundingBox();
+          if (rect && rect.width > 250 && rect.height > 40) {
+            box = rect;
           }
-
-          return coordinates
-        })
-
-        for (const item of coordinates) {
-          try {
-            let x = item.x + 30;
-            let y = item.y + item.h / 2;
-            await page.mouse.click(x, y);
-          } catch (err) { }
         }
-        return resolve(true)
+      } catch (err) {
+        logger.error(`${t.locError}${err.message}`);
       }
 
-      for (const element of elements) {
-        try {
-          const parentElement = await element.evaluateHandle(el => el.parentElement);
-          const box = await parentElement.boundingBox();
-          let x = box.x + 30;
-          let y = box.y + box.height / 2;
-          await page.mouse.click(x, y);
-        } catch (err) { }
+      if (box) {
+        logger.debug(`${t.locSuccess}x=${box.x.toFixed(1)}, y=${box.y.toFixed(1)}, w=${box.width.toFixed(1)}, h=${box.height.toFixed(1)}`);
+
+        await new Promise(r => setTimeout(r, Math.random() * 1000 + 1500));
+        
+        if (page.isClosed()) {
+          logger.debug(t.pageClosed);
+          clearInterval(waitInterval);
+          return resolve(false);
+        }
+
+        let x = box.x + 20 + (Math.random() * 6 - 3);
+        let y = box.y + 30 + (Math.random() * 6 - 3);
+        
+        logger.debug(`${t.clickPos}x=${x.toFixed(1)}, y=${y.toFixed(1)}`);
+
+        await page.mouse.click(x, y);
       }
-      clearInterval(waitInterval)
-      resolve(true)
+      
+      clearInterval(waitInterval);
+      resolve(true);
     } catch (err) {
-      clearInterval(waitInterval)
-      resolve(false)
+      clearInterval(waitInterval);
+      resolve(false);
     }
-  })
+  });
 }
 
-async function openBrowser(targetURL) {
+async function openBrowser(targetURL, fastMode = false) {
+  const { launch } = await import("cloakbrowser/puppeteer");
 
-  const { browser, page } = await connect({
+  const browser = await launch({
     headless: false,
-    args: [],
-    customConfig: {},
-    turnstile: false,
-    connectOption: { defaultViewport: null },
-    disableXvfb: false,
-    ignoreAllFlags: false,
+    humanize: true,
+    defaultViewport: null,
+    args: []
   });
+  
+  const pages = await browser.pages();
+  const page = pages.length > 0 ? pages[0] : await browser.newPage();
 
-  const client = page._client();
-  page.on("framenavigated", (frame) => {
-    if (frame.url().includes("challenges.cloudflare.com") === true) client.send("Target.detachFromTarget", { targetId: frame._id });
-  });
   page.setDefaultNavigationTimeout(60 * 1000);
   const userAgent = await page.evaluate(function () {
     return navigator.userAgent;
@@ -116,42 +139,65 @@ async function openBrowser(targetURL) {
   const content = await page.content();
 
   if (content.includes("challenge-platform") === true) {
-    console.log(chalk.yellow('Found CloudFlare challenge'));
+    logger.info(t.foundCaptcha);
+    let interval;
     try {
-      await sleep(5);
+      await sleep(1);
+      let isChecking = false;
       interval = setInterval(async () => {
+        if (isChecking || page.isClosed()) return;
+        isChecking = true;
         try {
           await checkTurnstile({ page });
         } catch (err) { }
+        isChecking = false;
       }, 1000);
-      await sleep(10);
-    } finally {
-      await sleep(10);
-      clearInterval(interval);
-      const title = await page.title();
-      const cookies = await page.cookies();
-      const cookie = cookies.map(cookie => cookie.name + "=" + cookie.value).join("; ").trim();
-      console.log("Title:", title);
-      console.log("Cookies:", cookie);
-      console.log("UserAgent:", userAgent);
-      const content = await page.content();
-      if (content.includes("challenge-platform") === false) {
-        console.log(chalk.green('Challenge solved'));
+      
+      if (fastMode) {
+        for (let i = 0; i < 20; i++) {
+          await sleep(1);
+          if (page.isClosed()) break;
+          const cookies = await page.cookies();
+          if (cookies.some(c => c.name === 'cf_clearance')) {
+            logger.info(t.fastModeSuccess);
+            break;
+          }
+        }
+      } else {
+        await sleep(10);
       }
-      await browser.close();
+    } finally {
+      if (!fastMode) await sleep(10);
+      if (interval) clearInterval(interval);
+      
+      let title = '', cookie = '';
+      if (!page.isClosed()) {
+        title = await page.title();
+        const cookies = await page.cookies();
+        cookie = cookies.map(c => c.name + "=" + c.value).join("; ").trim();
+        const finalContent = await page.content();
+        if (finalContent.includes("challenge-platform") === false) {
+          logger.info(t.solved);
+        }
+        await browser.close();
+      }
+      logger.info(`\x1b[36mTitle: ${title}\x1b[0m | \x1b[33mCookies: ${cookie}\x1b[0m | \x1b[32mUA: ${userAgent}\x1b[0m`);
       return { title, cookie, userAgent };
     }
   }
 
-  console.log(chalk.green('No challenge detected'));
-  await sleep(10);
-  const title = await page.title();
-  const cookies = await page.cookies();
-  const cookie = cookies.map(cookie => cookie.name + "=" + cookie.value).join("; ").trim();
-  console.log("Title:", title);
-  console.log("Cookies:", cookie);
-  console.log("UserAgent:", userAgent);
-  await browser.close();
+  logger.info(t.noCaptcha);
+  if (!fastMode) {
+    await sleep(10);
+  }
+  let title = '', cookie = '';
+  if (!page.isClosed()) {
+    title = await page.title();
+    const cookies = await page.cookies();
+    cookie = cookies.map(c => c.name + "=" + c.value).join("; ").trim();
+    await browser.close();
+  }
+  logger.info(`\x1b[36mTitle: ${title}\x1b[0m | \x1b[33mCookies: ${cookie}\x1b[0m | \x1b[32mUA: ${userAgent}\x1b[0m`);
   return { title, cookie, userAgent };
 }
 
