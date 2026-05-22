@@ -2,9 +2,8 @@
 
 该项目旨在实现自动化通过 Cloudflare Turnstile 质询，无需人工干预即可完成验证并获取 `cf_clearance`
 
-## 展示
-
-<video src="./assets/showcase.mp4" controls="controls" width="100%">您的浏览器不支持播放该视频</video>
+### 视频演示
+<video src="https://github.com/user-attachments/assets/93980817-d9a0-4cea-9007-5e69d5c77c50" controls="controls" width="100%">您的浏览器不支持播放该视频！</video>
 
 ![展示图 1](./assets/demo1.png)
 ![展示图 2](./assets/demo2.png)
