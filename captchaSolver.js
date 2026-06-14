@@ -51,10 +51,12 @@ async function main() {
   app.get('/api', async (req, res) => {
     const targetURL = req.query.target;
     const fastMode = req.query.fast === 'true';
+    const proxy = req.query.proxy || null;
+    const ua = req.query.ua || null;
 
     if (targetURL) {
       try {
-        const { title, cookie, userAgent } = await openBrowser(targetURL, fastMode);
+        const { title, cookie, userAgent } = await openBrowser(targetURL, fastMode, proxy, ua);
         res.send({ title, userAgent, cookie });
       } catch (error) {
         logger.error(`${t.apiError}${error.stack || error}`);
@@ -116,89 +118,129 @@ const checkTurnstile = ({ page }) => {
   });
 }
 
-async function openBrowser(targetURL, fastMode = false) {
+async function openBrowser(targetURL, fastMode = false, proxy = null, customUA = null) {
   const { launch } = await import("cloakbrowser/puppeteer");
 
-  const browser = await launch({
-    headless: false,
-    humanize: true,
-    defaultViewport: null,
-    args: []
-  });
-  
-  const pages = await browser.pages();
-  const page = pages.length > 0 ? pages[0] : await browser.newPage();
+  const launchArgs = [];
 
-  page.setDefaultNavigationTimeout(60 * 1000);
-  const userAgent = await page.evaluate(function () {
-    return navigator.userAgent;
-  });
-  await page.goto(targetURL, {
-    waitUntil: "domcontentloaded"
-  });
-  const content = await page.content();
+  if (customUA) {
+    launchArgs.push(`--user-agent=${customUA}`);
+    const uaLower = customUA.toLowerCase();
+    
+    if (uaLower.includes("mac os") || uaLower.includes("macintosh")) {
+      launchArgs.push("--fingerprint-platform=macos");
+    } else if (uaLower.includes("android")) {
+      launchArgs.push("--fingerprint-platform=android");
+    } else if (uaLower.includes("iphone") || uaLower.includes("ipad")) {
+      launchArgs.push("--fingerprint-platform=ios");
+    } else if (uaLower.includes("linux")) {
+      launchArgs.push("--fingerprint-platform=linux");
+    } else {
+      launchArgs.push("--fingerprint-platform=windows");
+    }
 
-  if (content.includes("challenge-platform") === true) {
-    logger.info(t.foundCaptcha);
-    let interval;
-    try {
-      await sleep(1);
-      let isChecking = false;
-      interval = setInterval(async () => {
-        if (isChecking || page.isClosed()) return;
-        isChecking = true;
-        try {
-          await checkTurnstile({ page });
-        } catch (err) { }
-        isChecking = false;
-      }, 1000);
-      
-      if (fastMode) {
-        for (let i = 0; i < 20; i++) {
-          await sleep(1);
-          if (page.isClosed()) break;
-          const cookies = await page.cookies();
-          if (cookies.some(c => c.name === 'cf_clearance')) {
-            logger.info(t.fastModeSuccess);
-            break;
-          }
-        }
-      } else {
-        await sleep(10);
-      }
-    } finally {
-      if (!fastMode) await sleep(10);
-      if (interval) clearInterval(interval);
-      
-      let title = '', cookie = '';
-      if (!page.isClosed()) {
-        title = await page.title();
-        const cookies = await page.cookies();
-        cookie = cookies.map(c => c.name + "=" + c.value).join("; ").trim();
-        const finalContent = await page.content();
-        if (finalContent.includes("challenge-platform") === false) {
-          logger.info(t.solved);
-        }
-        await browser.close();
-      }
-      logger.info(`\x1b[36mTitle: ${title}\x1b[0m | \x1b[33mCookies: ${cookie}\x1b[0m | \x1b[32mUA: ${userAgent}\x1b[0m`);
-      return { title, cookie, userAgent };
+
+
+    const chromeMatch = customUA.match(/Chrome\/(\d+)/i);
+    if (chromeMatch) {
+      launchArgs.push(`--fingerprint-brand-version=${chromeMatch[1]}`);
+      launchArgs.push(`--fingerprint-brand=Chrome`);
     }
   }
 
-  logger.info(t.noCaptcha);
-  if (!fastMode) {
-    await sleep(10);
+  const launchOptions = {
+    headless: false,
+    humanize: true,
+    args: launchArgs
+  };
+
+  if (proxy) {
+    launchOptions.proxy = proxy;
+    launchOptions.geoip = true;
   }
-  let title = '', cookie = '';
-  if (!page.isClosed()) {
-    title = await page.title();
-    const cookies = await page.cookies();
-    cookie = cookies.map(c => c.name + "=" + c.value).join("; ").trim();
-    await browser.close();
+
+  const browser = await launch(launchOptions);
+  
+  try {
+    const pages = await browser.pages();
+    const page = pages.length > 0 ? pages[0] : await browser.newPage();
+
+    page.setDefaultNavigationTimeout(60 * 1000);
+    const userAgent = await page.evaluate(function () {
+      return navigator.userAgent;
+    });
+    
+    await page.goto(targetURL, {
+      waitUntil: "domcontentloaded"
+    });
+    const content = await page.content();
+
+    if (content.includes("challenge-platform") === true) {
+      logger.info(t.foundCaptcha);
+      let interval;
+      try {
+        await sleep(1);
+        let isChecking = false;
+        interval = setInterval(async () => {
+          if (isChecking || page.isClosed()) return;
+          isChecking = true;
+          try {
+            await checkTurnstile({ page });
+          } catch (err) { }
+          isChecking = false;
+        }, 1000);
+        
+        if (fastMode) {
+          for (let i = 0; i < 20; i++) {
+            await sleep(1);
+            if (page.isClosed()) break;
+            const cookies = await page.cookies();
+            if (cookies.some(c => c.name === 'cf_clearance')) {
+              logger.info(t.fastModeSuccess);
+              break;
+            }
+          }
+        } else {
+          await sleep(10);
+        }
+      } finally {
+        if (!fastMode) await sleep(10);
+        if (interval) clearInterval(interval);
+        
+        let title = '', cookie = '';
+        if (!page.isClosed()) {
+          title = await page.title();
+          const cookies = await page.cookies();
+          cookie = cookies.map(c => c.name + "=" + c.value).join("; ").trim();
+          const finalContent = await page.content();
+          if (finalContent.includes("challenge-platform") === false) {
+            logger.info(t.solved);
+          }
+        }
+        logger.info(`\x1b[36mTitle: ${title}\x1b[0m | \x1b[33mCookies: ${cookie}\x1b[0m | \x1b[32mUA: ${userAgent}\x1b[0m`);
+        return { title, cookie, userAgent };
+      }
+    }
+
+    logger.info(t.noCaptcha);
+    if (!fastMode) {
+      await sleep(10);
+    }
+    let title = '', cookie = '';
+    if (!page.isClosed()) {
+      title = await page.title();
+      const cookies = await page.cookies();
+      cookie = cookies.map(c => c.name + "=" + c.value).join("; ").trim();
+    }
+    logger.info(`\x1b[36mTitle: ${title}\x1b[0m | \x1b[33mCookies: ${cookie}\x1b[0m | \x1b[32mUA: ${userAgent}\x1b[0m`);
+    return { title, cookie, userAgent };
+  } finally {
+    try {
+      await browser.close();
+    } catch (err) {
+      logger.error(`Error closing browser: ${err.message}`);
+    }
   }
-  logger.info(`\x1b[36mTitle: ${title}\x1b[0m | \x1b[33mCookies: ${cookie}\x1b[0m | \x1b[32mUA: ${userAgent}\x1b[0m`);
-  return { title, cookie, userAgent };
 }
 
 main();
